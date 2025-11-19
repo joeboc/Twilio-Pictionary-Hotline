@@ -1,8 +1,13 @@
 import Fastify from "fastify";
 import fastifyWs from "@fastify/websocket";
 import dotenv from "dotenv";
+import OpenAI from "openai";
 
 dotenv.config();
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 const PORT = process.env.PORT || 3000;
 const DOMAIN = process.env.NGROK_URL || "localhost";
@@ -15,18 +20,10 @@ const WS_URL =
 
 console.log("WS_URL is:", WS_URL);
 
-const GREETING =
-  "Welcome to Lifeline, America's First Gameshow Hotline. Note: Lifeline is not responsible for any injuries, infections, or death that may occur as part of lifeline.";
+const GREETING = "Welcome to the Pictionary Hotline";
 
 // Test word lists for games
 const PICTIONARY_WORDS = ["bear", "spaceship", "pizza", "guitar", "castle"];
-const OBJECT_WORDS = [
-  "toaster",
-  "umbrella",
-  "cactus",
-  "rubber duck",
-  "headphones",
-];
 
 const rooms = new Map();
 
@@ -38,9 +35,10 @@ function getRoom(id = "default") {
       phoneSocket: null, // Twilio ConversationRelay WebSocket
       drawerSocket: null, // web drawer
       callerSocket: null, // web caller
-      mode: "menu", // "menu" | "pictionary" | "describe"
+      mode: "menu", // "menu" | "pictionary"
       targetWord: null,
       drawSegments: [], // store drawing segments for this room
+      theme: null,
     };
     rooms.set(id, room);
   }
@@ -67,15 +65,61 @@ function sendToWeb(room, payload) {
   if (room.callerSocket) room.callerSocket.send(msg);
 }
 
-function startPictionary(room) {
+// Use AI to pick a single simple Pictionary word from a theme
+async function generatePictionaryWord(themeRaw) {
+  const theme = (themeRaw || "").trim();
+  // Fallback to random if no API key or theme weirdness
+  if (!process.env.OPENAI_API_KEY) {
+    console.warn("OPENAI_API_KEY not set, falling back to random word.");
+    return pickRandomWord(PICTIONARY_WORDS);
+  }
+
+  // If the caller says "random" or something similar, just pick random
+  if (!theme || /random/i.test(theme)) {
+    return pickRandomWord(PICTIONARY_WORDS);
+  }
+
+  try {
+    const prompt = `
+You are choosing a Pictionary word.
+The caller said the theme: "${theme}".
+
+Return exactly ONE simple, concrete noun (one or two words max) that fits that theme.
+The word should be something you can draw easily, like "pumpkin", "spaceship", "castle", "dragon", "hamburger".
+Do NOT add any explanation, punctuation, or extra text. Just the word itself.
+`;
+
+    const completion = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: prompt,
+    });
+
+    const raw = completion.output[0]?.content[0]?.text?.trim() || "";
+    // Just in case the model returns something with spaces/newlines, take first line
+    const firstLine = raw.split("\n")[0].trim();
+
+    // Safety fallback if somehow empty
+    if (!firstLine) {
+      return pickRandomWord(PICTIONARY_WORDS);
+    }
+
+    return firstLine;
+  } catch (err) {
+    console.error("Error generating Pictionary word:", err);
+    return pickRandomWord(PICTIONARY_WORDS);
+  }
+}
+
+async function startPictionary(room, explicitWord = null) {
   room.mode = "pictionary";
-  room.targetWord = pickRandomWord(PICTIONARY_WORDS);
+  room.targetWord =
+    explicitWord || pickRandomWord(PICTIONARY_WORDS);
   room.drawSegments = []; // reset drawing for new round
 
   // Phone instructions
   sendToPhone(
     room,
-    "You selected Pictionary. Your partner will draw something on their screen. Try to guess what it is by saying your guesses out loud."
+    `Great choice. Your word has been selected. Your partner will draw something on their screen. Try to guess what it is by saying your guesses out loud.`
   );
 
   // Web instructions
@@ -85,63 +129,45 @@ function startPictionary(room) {
   });
 }
 
-function startDescribe(room) {
-  room.mode = "describe";
-  room.targetWord = pickRandomWord(OBJECT_WORDS);
-  room.drawSegments = []; // reset drawing for new round
-
-  sendToPhone(
-    room,
-    "You selected Describe and Guess. Your partner is looking at an object on their screen. Ask questions and try to guess what it is."
-  );
-
-  sendToWeb(room, {
-    type: "describeStart",
-    object: room.targetWord,
-  });
-}
-
 function backToMenu(room) {
   room.mode = "menu";
   room.targetWord = null;
+  room.theme = null;
 
   sendToPhone(
     room,
-    "Round complete. Say Pictionary for a drawing round, or Describe for a guessing round."
+    "Round complete. Say a theme for the next word (for example: animals, Halloween, space, food), or say Random for any word, or say Quit to end the call."
   );
   sendToWeb(room, {
     type: "menu",
   });
 }
 
-function handlePhonePrompt(room, textRaw) {
+async function handlePhonePrompt(room, textRaw) {
   const text = (textRaw || "").toLowerCase().trim();
   if (!text) return;
 
   // Exit / Quit ends the call
   if (text.includes("quit") || text.includes("exit")) {
-    sendToPhone(room, "Thanks for playing the Game Show Hotline. Goodbye.");
+    sendToPhone(room, "Thanks for playing the Pictionary Hotline. Goodbye.");
     if (room.phoneSocket) room.phoneSocket.close();
     return;
   }
 
   if (room.mode === "menu") {
-    if (text.includes("pictionary")) {
-      startPictionary(room);
-      return;
-    }
-    if (text.includes("describe")) {
-      startDescribe(room);
-      return;
-    }
+    // Treat whatever they say as a theme for the next word
+    room.theme = textRaw;
     sendToPhone(
       room,
-      "I did not catch that. Say Pictionary or Describe to choose a game."
+      `Got it. Choosing a word for the theme: ${textRaw}.`
     );
+
+    const word = await generatePictionaryWord(textRaw);
+    await startPictionary(room, word);
     return;
   }
 
-  if (room.mode === "pictionary" || room.mode === "describe") {
+  if (room.mode === "pictionary") {
     const target = (room.targetWord || "").toLowerCase();
     const normalized = text.replace(/[^\w\s]/g, " ");
 
@@ -291,8 +317,8 @@ fastify.get("/", async (request, reply) => {
         <div class="panel">
           <ol style="padding-left: 18px; margin: 0; font-size: 0.85rem;">
             <li>Have your friend call your Twilio number.</li>
-            <li>They'll hear a menu: say "Pictionary" or "Describe".</li>
-            <li>You (on this page) will see the secret word or object.</li>
+            <li>They'll be asked for a theme, like "animals", "space", "Halloween", or they can say "random".</li>
+            <li>You (on this page) will see the secret word to draw.</li>
             <li>They try to guess it using only your hints or drawing.</li>
           </ol>
         </div>
@@ -429,7 +455,7 @@ fastify.get("/", async (request, reply) => {
       const ws = new WebSocket(protocol + "://" + window.location.host + "/ws-web");
 
       ws.addEventListener("open", () => {
-        statusEl.textContent = "Connected. Waiting for caller to choose a game.";
+        statusEl.textContent = "Connected. Waiting for caller to pick a theme.";
         log("Connected to game server.");
 
         ws.send(JSON.stringify({ type: "joinWeb", roomId: "default", role }));
@@ -455,7 +481,7 @@ fastify.get("/", async (request, reply) => {
 
         if (msg.type === "menu") {
           roundInfoEl.textContent =
-            "Caller is at the menu. They can say Pictionary or Describe.";
+            "Caller is choosing a theme. They'll say something like 'animals', 'space', 'Halloween', or 'random'.";
           log("Back to menu.");
         }
 
@@ -488,26 +514,6 @@ fastify.get("/", async (request, reply) => {
               "Your partner is drawing something. Listen to their clues and try to guess it." +
               "</span>";
             log("Pictionary started for caller (word hidden).");
-          }
-
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-
-        // Start of a Describe & Guess round
-        if (msg.type === "describeStart") {
-          if (role === "drawer") {
-            roundInfoEl.innerHTML =
-              '<div class="word-pill"><span class="key">Object</span> <strong>' +
-              msg.object +
-              "</strong></div><div style=\\"margin-top:8px;font-size:0.8rem;color:#9ca3af\\">Describe this object without saying its name. The caller will try to guess it.</div>";
-            log("Describe & Guess started. Object: " + msg.object);
-          } else {
-            roundInfoEl.innerHTML =
-              "<strong>Describe & Guess round in progress.</strong><br/>" +
-              '<span style="font-size:0.8rem;color:#9ca3af">' +
-              "Your partner can see an object. Ask questions and try to figure out what it is." +
-              "</span>";
-            log("Describe & Guess started for caller (object hidden).");
           }
 
           ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -580,14 +586,14 @@ fastify.register(async function (instance) {
     fastify.log.info("Phone WebSocket connection opened");
     sendToPhone(
       room,
-      "Welcome to the Game Show Hotline. Say Pictionary for a drawing round, or Describe for a guessing round."
+      "Welcome to the Pictionary Hotline. Say a theme for your word, like 'animals', 'space', 'Halloween', 'food', or say 'random'. Say Quit to end the call."
     );
     sendToWeb(room, {
       type: "status",
-      message: "Caller connected. Waiting for them to choose a game.",
+      message: "Caller connected. Waiting for them to pick a theme.",
     });
 
-    socket.on("message", (data) => {
+    socket.on("message", async (data) => {
       let parsed;
       try {
         parsed = JSON.parse(data.toString());
@@ -604,7 +610,7 @@ fastify.register(async function (instance) {
       if (parsed.type === "prompt") {
         const text = parsed.voicePrompt || parsed.text || "";
         fastify.log.info({ text }, "Caller said (recognized text)");
-        handlePhonePrompt(room, text);
+        await handlePhonePrompt(room, text);
       }
     });
 
@@ -652,7 +658,7 @@ fastify.register(async function (instance) {
           ? {
               type: "status",
               message:
-                "Connected to room. Caller is on the line. They can say Pictionary or Describe.",
+                "Connected to room. Caller is on the line and can pick a theme.",
             }
           : {
               type: "status",
