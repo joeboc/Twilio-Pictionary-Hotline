@@ -12,7 +12,7 @@ const openai = new OpenAI({
 const PORT = process.env.PORT || 3000;
 const DOMAIN = process.env.NGROK_URL || "localhost";
 
-// WebSocket setup for Twilio ConversationRelay (Hotline)
+// WebSocket for Twilio ConversationRelay
 const WS_URL =
   DOMAIN === "localhost"
     ? `ws://localhost:${PORT}/ws`
@@ -20,7 +20,7 @@ const WS_URL =
 
 console.log("WS_URL is:", WS_URL);
 
-const GREETING = "Welcome to the Pictionary Hotline";
+const GREETING = "Hello Caller";
 
 // Test word lists for games
 const PICTIONARY_WORDS = ["bear", "spaceship", "pizza", "guitar", "castle"];
@@ -35,9 +35,9 @@ function getRoom(id = "default") {
       phoneSocket: null, // Twilio ConversationRelay WebSocket
       drawerSocket: null, // web drawer
       callerSocket: null, // web caller
-      mode: "menu", // "menu" | "pictionary"
+      mode: "menu", // "menu" | "pictionary" //Just in case we add more games later
       targetWord: null,
-      drawSegments: [], // store drawing segments for this room
+      drawSegments: [], // store drawings to prevent refresh clear
       theme: null,
     };
     rooms.set(id, room);
@@ -65,27 +65,27 @@ function sendToWeb(room, payload) {
   if (room.callerSocket) room.callerSocket.send(msg);
 }
 
-// Use AI to pick a single simple Pictionary word from a theme
+// Use AI to pick a Pictionary word from a theme
 async function generatePictionaryWord(themeRaw) {
   const theme = (themeRaw || "").trim();
-  // Fallback to random if no API key or theme weirdness
+  // Fallback to word from original list pre OpenAI
   if (!process.env.OPENAI_API_KEY) {
     console.warn("OPENAI_API_KEY not set, falling back to random word.");
     return pickRandomWord(PICTIONARY_WORDS);
   }
 
-  // If the caller says "random" or something similar, just pick random
+  // If the caller says "random" or something similar, pick at random random
   if (!theme || /random/i.test(theme)) {
     return pickRandomWord(PICTIONARY_WORDS);
   }
 
   try {
     const prompt = `
-You are choosing a Pictionary word.
-The caller said the theme: "${theme}".
+You are choosing a Pictionary word to be drawn.
+The chosen theme is: "${theme}".
 
-Return exactly ONE simple, concrete noun (one or two words max) that fits that theme.
-The word should be something you can draw easily, like "pumpkin", "spaceship", "castle", "dragon", "hamburger".
+Return exactly ONE concrete noun suitable for pictionary that fits that theme.
+Try and be as accurate to the theme as possible.
 Do NOT add any explanation, punctuation, or extra text. Just the word itself.
 `;
 
@@ -95,10 +95,10 @@ Do NOT add any explanation, punctuation, or extra text. Just the word itself.
     });
 
     const raw = completion.output[0]?.content[0]?.text?.trim() || "";
-    // Just in case the model returns something with spaces/newlines, take first line
+    // In case something with multiple lines is selected just use the first
     const firstLine = raw.split("\n")[0].trim();
 
-    // Safety fallback if somehow empty
+    // If prompt is empty
     if (!firstLine) {
       return pickRandomWord(PICTIONARY_WORDS);
     }
@@ -149,17 +149,17 @@ async function handlePhonePrompt(room, textRaw) {
 
   // Exit / Quit ends the call
   if (text.includes("quit") || text.includes("exit")) {
-    sendToPhone(room, "Thanks for playing the Pictionary Hotline. Goodbye.");
+    sendToPhone(room, "Thanks for joining. We here at pictionary hotline, appreciate that you had better ways to use your time. Goodbye.");
     if (room.phoneSocket) room.phoneSocket.close();
     return;
   }
 
   if (room.mode === "menu") {
-    // Treat whatever they say as a theme for the next word
+    // Use the first word heard as the first Theme
     room.theme = textRaw;
     sendToPhone(
       room,
-      `Got it. Choosing a word for the theme: ${textRaw}.`
+      `Nice Theme! We will find a word related to: ${textRaw} for the Drawer to draw.`
     );
 
     const word = await generatePictionaryWord(textRaw);
@@ -174,7 +174,7 @@ async function handlePhonePrompt(room, textRaw) {
     if (target && normalized.includes(target.split(" ")[0])) {
       sendToPhone(
         room,
-        `Correct! The word was ${room.targetWord}. Nice job.`
+        `You Got it! The word was ${room.targetWord}. Nice job!`
       );
       sendToWeb(room, {
         type: "roundResult",
@@ -183,7 +183,7 @@ async function handlePhonePrompt(room, textRaw) {
       });
       backToMenu(room);
     } else {
-      sendToPhone(room, "Not quite. Try another guess.");
+      sendToPhone(room, "Not quite right. Guess again.");
       sendToWeb(room, {
         type: "guess",
         guess: textRaw,
@@ -204,7 +204,7 @@ fastify.get("/", async (request, reply) => {
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Game Show Hotline</title>
+    <title>Pictionary Hotline</title>
 
     <style>
       body {
@@ -301,26 +301,51 @@ fastify.get("/", async (request, reply) => {
         overflow-y: auto;
         color: #cbd5f5;
       }
+
+      .chat-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 6px;
+      }
+
+      .chat-input {
+        flex: 1;
+        padding: 6px 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(148,163,184,0.5);
+        background: #020617;
+        color: #e5e7eb;
+        font-size: 0.85rem;
+      }
+
+      .chat-button {
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: none;
+        background: #f97316;
+        color: #020617;
+        font-weight: 600;
+        font-size: 0.85rem;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <div class="card">
       <!-- LEFT COLUMN -->
       <div>
-        <h1>Game Show Hotline</h1>
+        <h1>Pictionary Hotline</h1>
         <div class="subtitle">
-          One player calls the hotline, the other opens this page. Play cooperative mini games over the phone.
+          Possibly the weirdest way to play pictionary
         </div>
         <div class="panel" id="roleInfoPanel" style="margin-top:12px; font-size:0.8rem; color:#9ca3af;"></div>
 
         <div class="section-title">How to play</div>
         <div class="panel">
-          <ol style="padding-left: 18px; margin: 0; font-size: 0.85rem;">
-            <li>Have your friend call your Twilio number.</li>
-            <li>They'll be asked for a theme, like "animals", "space", "Halloween", or they can say "random".</li>
-            <li>You (on this page) will see the secret word to draw.</li>
-            <li>They try to guess it using only your hints or drawing.</li>
-          </ol>
+          <ol id="howToList" style="padding-left: 18px; margin: 0; font-size: 0.85rem;">
+          <li>Default Non role specific...</li>
+</ol>
+
         </div>
 
         <div class="section-title">Connection</div>
@@ -339,20 +364,38 @@ fastify.get("/", async (request, reply) => {
           Waiting for caller to connect...
         </div>
 
-        <div id="callerControls" class="panel" style="display:none; margin-top: 8px;">
-          <div style="font-size:0.8rem; color:#9ca3af; margin-bottom:6px;">
-            Caller controls (only visible if ?role=caller):
-          </div>
-          <button id="btnYes" style="margin-right:8px;">Yes</button>
-          <button id="btnNo">No</button>
-        </div>
-
         <div class="section-title">Canvas (for Pictionary)</div>
         <canvas id="canvas"></canvas>
+
+        <div class="section-title">Chat to caller</div>
+        <div id="chatPanel" class="panel">
+          <div style="font-size:0.8rem; color:#9ca3af; margin-bottom:4px;">
+            Drawer can send short messages that will be read out to the caller.
+          </div>
+          <button id="chatToggle" class="chat-button" style="margin-bottom:6px;">
+            Enable chat to caller
+          </button>
+          <div class="chat-row">
+            <input
+              id="chatInput"
+              class="chat-input"
+              placeholder="Type a short hint to send to the caller..."
+              disabled
+            />
+            <button id="chatSend" class="chat-button" disabled>Send</button>
+          </div>
+          <div
+            id="chatHint"
+            style="font-size:0.75rem; color:#9ca3af; margin-top:4px;"
+          >
+            Chat to caller is currently OFF. Click "Enable chat to caller" to opt in.
+          </div>
+        </div>
+
       </div>
     </div>
 
-    <script>
+         <script>
       const params = new URLSearchParams(window.location.search);
       const role = params.get("role") || "drawer";
 
@@ -362,23 +405,61 @@ fastify.get("/", async (request, reply) => {
       const canvas = document.getElementById("canvas");
       const ctx = canvas.getContext("2d");
 
-      const callerControls = document.getElementById("callerControls");
-      const btnYes = document.getElementById("btnYes");
-      const btnNo = document.getElementById("btnNo");
       const roleInfoPanel = document.getElementById("roleInfoPanel");
+      const chatPanel = document.getElementById("chatPanel");
+      const chatInput = document.getElementById("chatInput");
+      const chatSend = document.getElementById("chatSend");
+      const chatToggle = document.getElementById("chatToggle");
+      const chatHint = document.getElementById("chatHint");
+      const howToList = document.getElementById("howToList");
 
-      if (role === "drawer") {
-        if (roleInfoPanel) {
-          roleInfoPanel.textContent =
-            "You are the DRAWER. You will see the secret word and draw or describe it for the caller.";
-        }
-      } else if (role === "caller") {
-        if (roleInfoPanel) {
-          roleInfoPanel.textContent =
-            "You are the CALLER'S HELPER. The caller is on the phone; use this view to answer Yes/No or draw if needed.";
-        }
-        if (callerControls) callerControls.style.display = "block";
-      }
+let chatEnabled = false;
+
+// Clear the default list item
+if (howToList) {
+  howToList.innerHTML = "";
+}
+
+if (role === "drawer") {
+  if (roleInfoPanel) {
+    roleInfoPanel.textContent =
+      "You are the DRAWER. You will be given a word to draw for the caller.";
+  }
+
+  if (howToList) {
+    const items = [
+      "Have your friend, or whoever else you're playing with call the hotline number 1 559 524 4505.",
+      "They will be asked for a theme which will be used to prompt AI to choose the word you draw (A great use of OpenAI's API I know)",
+      "Draw or describe it (without saying the word) so they can guess. You can also enable chat, to type messages that will be read out to the caller (It's on you if you use this to cheat)"
+    ];
+    howToList.innerHTML = items
+      .map((text) => "<li>" + text + "</li>")
+      .join("");
+  }
+} else if (role === "caller") {
+  if (roleInfoPanel) {
+    roleInfoPanel.textContent =
+      "You are the CALLER. Try and guess what the drawer is illustrating so beautifully for you";
+  }
+
+  if (chatPanel) {
+    chatPanel.style.display = "none";
+  }
+
+  if (howToList) {
+    const items = [
+      "Call the Pictionary Hotline number 1 559 524 4505.",
+      "You will be prompted for a theme, AI will then be given your theme to choose the word drawn (Great use of Open AI's API I know).",
+      "Watch the canvas here as the drawer sketches the secret word.",
+      "Try and guess what the drawer's word is by speaking your guesses into the phone"
+    ];
+    howToList.innerHTML = items
+      .map((text) => "<li>" + text + "</li>")
+      .join("");
+  }
+}
+
+
 
       function log(msg) {
         const div = document.createElement("div");
@@ -451,6 +532,25 @@ fastify.get("/", async (request, reply) => {
         });
       });
 
+      function setChatEnabled(enabled) {
+        chatEnabled = enabled;
+        if (chatInput) chatInput.disabled = !enabled;
+        if (chatSend) chatSend.disabled = !enabled;
+        if (chatHint) {
+          chatHint.textContent = enabled
+            ? "Chat to caller is ON. Short messages will be read out loud to the caller."
+            : 'Chat to caller is currently OFF. Click "Enable chat to caller" to opt in.';
+        }
+        if (chatToggle) {
+          chatToggle.textContent = enabled
+            ? "Disable chat to caller"
+            : "Enable chat to caller";
+        }
+      }
+
+      // start with chat OFF
+      setChatEnabled(false);
+
       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(protocol + "://" + window.location.host + "/ws-web");
 
@@ -481,7 +581,7 @@ fastify.get("/", async (request, reply) => {
 
         if (msg.type === "menu") {
           roundInfoEl.textContent =
-            "Caller is choosing a theme. They'll say something like 'animals', 'space', 'Halloween', or 'random'.";
+            "Caller is choosing the theme. They can say virtually anything so blame them for whatever word you get.";
           log("Back to menu.");
         }
 
@@ -504,7 +604,7 @@ fastify.get("/", async (request, reply) => {
             roundInfoEl.innerHTML =
               '<div class="word-pill"><span class="key">Draw</span> <strong>' +
               msg.word +
-              "</strong></div><div style=\\"margin-top:8px;font-size:0.8rem;color:#9ca3af\\">Draw this word. Do NOT say it out loud. Let the caller guess.</div>";
+              '</strong></div><div style="margin-top:8px;font-size:0.8rem;color:#9ca3af">Draw this word. Do NOT say it out loud. Let the caller guess.</div>';
             log("Pictionary started. Word: " + msg.word);
           } else {
             // Caller does NOT see the word
@@ -531,6 +631,14 @@ fastify.get("/", async (request, reply) => {
           log("Caller guessed: " + msg.guess);
         }
 
+        if (msg.type === "drawerChat") {
+          if (role === "drawer") {
+            log("You (to caller): " + msg.text);
+          } else if (role === "caller") {
+            log("Drawer says (read to caller): " + msg.text);
+          }
+        }
+
         // Caller renders remote drawing
         if (msg.type === "drawSegment" && role === "caller") {
           ctx.beginPath();
@@ -546,18 +654,30 @@ fastify.get("/", async (request, reply) => {
         }
       }
 
-      if (role === "caller") {
-        btnYes?.addEventListener("click", () => {
-          log("You pressed YES");
-          sendToServer({ type: "callerAnswer", answer: "yes" });
+      if (chatToggle && role === "drawer") {
+        chatToggle.addEventListener("click", () => {
+          setChatEnabled(!chatEnabled);
+        });
+      }
+
+      if (chatSend && chatInput && role === "drawer") {
+        chatSend.addEventListener("click", () => {
+          const text = chatInput.value.trim();
+          if (!text || !chatEnabled) return;
+          sendToServer({ type: "drawerChat", text });
+          chatInput.value = "";
         });
 
-        btnNo?.addEventListener("click", () => {
-          log("You pressed NO");
-          sendToServer({ type: "callerAnswer", answer: "no" });
+        chatInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (!chatEnabled) return;
+            chatSend.click();
+          }
         });
       }
     </script>
+
   </body>
 </html>
   `);
@@ -577,54 +697,12 @@ fastify.get("/twiml", async (request, reply) => {
 });
 
 // WebSocket routes: /ws (phone) and /ws-web (browser)
+// WEB WebSocket (drawer / caller tab)
 fastify.register(async function (instance) {
-  // PHONE WebSocket (Twilio ConversationRelay)
   instance.get("/ws", { websocket: true }, (socket, req) => {
-    const room = getRoom("default");
-    room.phoneSocket = socket;
-
-    fastify.log.info("Phone WebSocket connection opened");
-    sendToPhone(
-      room,
-      "Welcome to the Pictionary Hotline. Say a theme for your word, like 'animals', 'space', 'Halloween', 'food', or say 'random'. Say Quit to end the call."
-    );
-    sendToWeb(room, {
-      type: "status",
-      message: "Caller connected. Waiting for them to pick a theme.",
-    });
-
-    socket.on("message", async (data) => {
-      let parsed;
-      try {
-        parsed = JSON.parse(data.toString());
-      } catch {
-        fastify.log.warn(
-          "Non-JSON message from phone socket:",
-          data.toString()
-        );
-        return;
-      }
-
-      fastify.log.info({ parsed }, "WS message from phone");
-
-      if (parsed.type === "prompt") {
-        const text = parsed.voicePrompt || parsed.text || "";
-        fastify.log.info({ text }, "Caller said (recognized text)");
-        await handlePhonePrompt(room, text);
-      }
-    });
-
-    socket.on("close", () => {
-      fastify.log.info("Phone WebSocket closed");
-      room.phoneSocket = null;
-      sendToWeb(room, {
-        type: "status",
-        message: "Caller disconnected. Waiting for a new call.",
-      });
-    });
+    // ... your /ws handler stays the same ...
   });
 
-  // WEB WebSocket (drawer / caller tab)
   instance.get("/ws-web", { websocket: true }, (socket, req) => {
     const room = getRoom("default");
     fastify.log.info("Web WebSocket connection opened");
@@ -634,15 +712,18 @@ fastify.register(async function (instance) {
       try {
         parsed = JSON.parse(data.toString());
       } catch {
+        fastify.log.warn("Non-JSON message from web client:", data.toString());
         return;
       }
 
+      // --- JOIN WEB ---
       if (parsed.type === "joinWeb") {
-        const role = parsed.role || "drawer";
+        let role = (parsed.role || "drawer").toLowerCase();
+        if (role !== "caller") role = "drawer";
 
         if (role === "drawer") {
           room.drawerSocket = socket;
-        } else if (role === "caller") {
+        } else {
           room.callerSocket = socket;
         }
 
@@ -658,7 +739,9 @@ fastify.register(async function (instance) {
           ? {
               type: "status",
               message:
-                "Connected to room. Caller is on the line and can pick a theme.",
+                room.mode === "pictionary"
+                  ? "Caller is on the line. Pictionary round in progress."
+                  : "Connected to room. Caller is on the line and can pick a theme.",
             }
           : {
               type: "status",
@@ -668,7 +751,12 @@ fastify.register(async function (instance) {
 
         socket.send(JSON.stringify(statusPayload));
 
-        // send existing drawing segments to this client, if any
+        // 🔍 LOG how many segments we think we have
+        fastify.log.info(
+          { count: room.drawSegments.length },
+          "Sending initDrawing to new web client"
+        );
+
         if (room.drawSegments && room.drawSegments.length > 0) {
           socket.send(
             JSON.stringify({
@@ -678,12 +766,26 @@ fastify.register(async function (instance) {
           );
         }
 
+        if (room.mode === "pictionary" && room.targetWord) {
+          socket.send(
+            JSON.stringify({
+              type: "pictionaryStart",
+              word: room.targetWord,
+            })
+          );
+        } else if (room.mode === "menu") {
+          socket.send(
+            JSON.stringify({
+              type: "menu",
+            })
+          );
+        }
+
         return;
       }
 
-      // Drawing is copied from Drawer to Caller
+      // --- DRAW SEGMENT ---
       if (parsed.type === "drawSegment") {
-        // store the segment so new clients can replay it later
         room.drawSegments.push({
           x1: parsed.x1,
           y1: parsed.y1,
@@ -691,15 +793,40 @@ fastify.register(async function (instance) {
           y2: parsed.y2,
         });
 
+        fastify.log.info(
+          { count: room.drawSegments.length },
+          "Stored drawSegment; total segments now"
+        );
+
         if (socket === room.drawerSocket && room.callerSocket) {
           room.callerSocket.send(JSON.stringify(parsed));
         }
         return;
       }
 
+      // --- DRAWER CHAT ---
+      if (parsed.type === "drawerChat") {
+        fastify.log.info({ text: parsed.text }, "Drawer chat message");
+        sendToPhone(room, parsed.text);
+
+        if (room.drawerSocket) {
+          room.drawerSocket.send(
+            JSON.stringify({ type: "drawerChat", text: parsed.text })
+          );
+        }
+        if (room.callerSocket) {
+          room.callerSocket.send(
+            JSON.stringify({ type: "drawerChat", text: parsed.text })
+          );
+        }
+        return;
+      }
+
       if (parsed.type === "callerAnswer") {
-        fastify.log.info({ answer: parsed.answer }, "Caller browser answered");
-        // future: forward to drawer, etc.
+        fastify.log.info(
+          { answer: parsed.answer },
+          "Caller browser answered (unused)"
+        );
       }
     });
 
