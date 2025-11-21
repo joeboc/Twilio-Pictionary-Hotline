@@ -12,7 +12,7 @@ const openai = new OpenAI({
 const PORT = process.env.PORT || 3000;
 const DOMAIN = process.env.NGROK_URL || "localhost";
 
-// WebSocket base for Twilio ConversationRelay (roomId will be appended as query)
+// WebSocket for Twilio ConversationRelay (roomId will be appended to allow for multiple isntances)
 const WS_BASE =
   DOMAIN === "localhost"
     ? `ws://localhost:${PORT}/ws`
@@ -20,11 +20,11 @@ const WS_BASE =
 
 console.log("WS_BASE is:", WS_BASE);
 
-// Test word lists for games
+// Test word list for games
 const PICTIONARY_WORDS = ["bear", "spaceship", "pizza", "guitar", "castle"];
 
 const rooms = new Map();
-// Track which roomId each WebSocket belongs to, without mutating the socket object
+// Track which roomId each WebSocket belongs to
 const socketRoom = new WeakMap();
 
 function getRoom(id = "default") {
@@ -85,7 +85,7 @@ async function generatePictionaryWord(themeRaw) {
   if (!theme || /random/i.test(theme)) {
     return pickRandomWord(PICTIONARY_WORDS);
   }
-
+  //Prompt to generate word from theme given
   try {
     const prompt = `
 You are choosing a Pictionary word to be drawn.
@@ -205,7 +205,7 @@ const fastify = Fastify({ logger: true });
 fastify.register(fastifyWs);
 
 /**
- * HOME PAGE: Choose role + enter numeric room code
+ * HOME PAGE: Choose role and enter numeric room code to create instance
  */
 fastify.get("/", async (request, reply) => {
   reply.type("text/html").send(`
@@ -324,9 +324,9 @@ fastify.get("/", async (request, reply) => {
   </head>
   <body>
     <div class="card">
-      <h1>Pictionary Hotline</h1>
+      <h1>Pictionary Hotline (Powered by Twilio)</h1>
       <div class="subtitle">
-        Possibly the weirdest way to play Pictionary. One person calls a phone hotline, the other opens this page. You both share a room code so you end up in the same chaos.
+        Possibly the weirdest way to play Pictionary. Both players open this page, One player draws an image, the other makes their guesses on the Pictionary Hotline.
       </div>
 
       <div class="section-title">1. Choose a room code</div>
@@ -351,7 +351,7 @@ fastify.get("/", async (request, reply) => {
           <button id="callerBtn" class="role-button caller-btn">
             <span>I am the Caller</span>
             <span class="role-caption">
-              I’m on the phone trying to guess the AI-chosen word.
+              I’m on the phone trying to guess the Drawer's word.
             </span>
           </button>
           <button id="drawerBtn" class="role-button drawer-btn">
@@ -410,7 +410,7 @@ fastify.get("/", async (request, reply) => {
 });
 
 /**
- * PLAY PAGE: actual game UI, uses role + roomId
+ *game UI, uses role + roomId
  */
 fastify.get("/play", async (request, reply) => {
   reply.type("text/html").send(`
@@ -724,7 +724,7 @@ fastify.get("/play", async (request, reply) => {
       } else if (role === "caller") {
         if (roleInfoPanel) {
           roleInfoPanel.textContent =
-            "You are the CALLER'S HELPER. The caller is on the phone; use this view to watch the drawing and help them guess.";
+            "You are the CALLER. The drawer will be illustrating a word for you to guess.";
         }
 
         if (chatPanel) {
@@ -733,10 +733,10 @@ fastify.get("/play", async (request, reply) => {
 
         if (howToList) {
           const items = [
-            "Make sure the person who is actually on the phone has the room code " + roomId + ".",
-            "They will call the Pictionary Hotline and enter this room code on their keypad when asked.",
-            "After that, they will be prompted for a theme such as animals, space, Halloween, or random.",
-            "Watch the canvas here as the drawer sketches the secret word and help the caller by describing what you see and thinking up guesses."
+            "Call the Pictionary Hotline number +1(559)524-4505 and enter your room code when prompted. Afterwards you will be prompted for a theme for the pictionary round.",
+            "Watch the drawer illustrate and try to guess what they're drawing. Make sure to speak your guesses into the phone.",
+            "Our super advanced Twilio Hotline assistant will let you know if your guess is correct.",
+            "The drawer has the option to enable chat, to send messages which the Twilio Voice Assistant will read aloud."
           ];
           howToList.innerHTML = items.map((text) => "<li>" + text + "</li>").join("");
         }
@@ -871,7 +871,7 @@ fastify.get("/play", async (request, reply) => {
 
         if (msg.type === "menu") {
           roundInfoEl.textContent =
-            "Caller is choosing the theme. They can say virtually anything so blame them for whatever word you get.";
+            "Caller is choosing the theme. They can say virtually anything so blame them (and OpenAI) for whatever word you get.";
           log("Back to menu.");
         }
 
@@ -990,7 +990,7 @@ fastify.get("/play", async (request, reply) => {
 /**
  * TwiML entry point for Voice webhook:
  * 1) Ask for 4–6 digit room code via DTMF
- * 2) Send to /start-relay with method="GET" (Digits in query string)
+ * 2) Send to /start-relay with method="GET"
  */
 fastify.get("/twiml", async (request, reply) => {
   fastify.log.info("HTTP /twiml hit");
@@ -1012,7 +1012,6 @@ fastify.get("/twiml", async (request, reply) => {
 
 /**
  * After DTMF is entered, Twilio calls this with ?Digits=xxxx
- * Here we connect the call to ConversationRelay and pass roomId in the ws URL.
  */
 fastify.get("/start-relay", async (request, reply) => {
   fastify.log.info({ query: request.query }, "HTTP /start-relay hit");
@@ -1025,8 +1024,8 @@ fastify.get("/start-relay", async (request, reply) => {
 
   const roomId = digits || "0000";
 
-  // 🔥 Build the WS URL from the actual incoming host/protocol
-  const host = request.headers["host"]; // e.g. "twilio-pictionary-hotline.onrender.com"
+  // Build the WS URL from the actual incoming host/protocol
+  const host = request.headers["host"]; 
   const protoHeader = request.headers["x-forwarded-proto"] || "https"; // "https" on Render
   const scheme = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
   const wsScheme = scheme === "https" ? "wss" : "ws";
@@ -1055,10 +1054,9 @@ fastify.get("/start-relay", async (request, reply) => {
 fastify.register(async function (instance) {
   /**
    * PHONE WebSocket (Twilio ConversationRelay)
-   * We now get roomId from the URL query (set in /start-relay).
    */
   instance.get("/ws", { websocket: true }, (socket, req) => {
-    // Parse roomId from ws URL query
+    //roomId from ws URL query
     const url = new URL(req.url, "http://dummy");
     const roomId = (url.searchParams.get("roomId") || "0000").toString();
 
@@ -1069,7 +1067,7 @@ fastify.register(async function (instance) {
     const room = getRoom(roomId);
     room.phoneSocket = socket;
 
-    // Notify any web clients in this room that caller connected
+    // Notify that caller connected
     sendToWeb(room, {
       type: "status",
       message:
@@ -1092,7 +1090,6 @@ fastify.register(async function (instance) {
 
       fastify.log.info({ parsed }, "Phone WS parsed message");
 
-      // Ignore setup/info/etc. Only care about prompts
       if (parsed.type === "prompt") {
         const text = parsed.voicePrompt || parsed.text || "";
         fastify.log.info({ roomId, text }, "Caller said (recognized text)");
@@ -1107,7 +1104,7 @@ fastify.register(async function (instance) {
       const room = getRoom(roomId);
       room.phoneSocket = null;
 
-      // Reset the room on caller disconnect
+      // Reset the room if caller disconnects to prevent issues
       resetRoom(room);
 
       sendToWeb(room, {
@@ -1121,10 +1118,6 @@ fastify.register(async function (instance) {
     });
   });
 
-  /**
-   * WEB WebSocket (drawer / caller tab)
-   * Uses roomId from joinWeb message to join per-room state.
-   */
   instance.get("/ws-web", { websocket: true }, (socket, req) => {
     fastify.log.info("Web WebSocket connection opened");
 
@@ -1137,7 +1130,7 @@ fastify.register(async function (instance) {
         return;
       }
 
-      // --- JOIN WEB ---
+      // Join web
       if (parsed.type === "joinWeb") {
         const roomId = (parsed.roomId || "0000").toString();
         let role = (parsed.role || "drawer").toLowerCase();
@@ -1236,7 +1229,7 @@ fastify.register(async function (instance) {
         return;
       }
 
-      // --- DRAWER CHAT ---
+      // Chat bar for drawer
       if (parsed.type === "drawerChat") {
         fastify.log.info({ roomId, text: parsed.text }, "Drawer chat message");
         sendToPhone(room, parsed.text);
@@ -1254,7 +1247,7 @@ fastify.register(async function (instance) {
         return;
       }
 
-      // --- CLEAR CANVAS ---
+      // CLear button
       if (parsed.type === "clearCanvas") {
         room.drawSegments = [];
         fastify.log.info({ roomId }, "Canvas cleared by drawer");
