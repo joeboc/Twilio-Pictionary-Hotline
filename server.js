@@ -24,6 +24,8 @@ console.log("WS_BASE is:", WS_BASE);
 const PICTIONARY_WORDS = ["bear", "spaceship", "pizza", "guitar", "castle"];
 
 const rooms = new Map();
+// Track which roomId each WebSocket belongs to, without mutating the socket object
+const socketRoom = new WeakMap();
 
 function getRoom(id = "default") {
   let room = rooms.get(id);
@@ -563,6 +565,31 @@ fastify.get("/play", async (request, reply) => {
       .back-button:hover {
         background: rgba(129,140,248,0.1);
       }
+
+      /* NEW: clear button and header above canvas */
+      .canvas-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 4px;
+        font-size: 0.85rem;
+        color: #9ca3af;
+      }
+
+      .small-outline-button {
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(148,163,184,0.8);
+        background: transparent;
+        color: #e5e7eb;
+        font-size: 0.75rem;
+        cursor: pointer;
+      }
+
+      .small-outline-button:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
     </style>
   </head>
   <body>
@@ -604,6 +631,12 @@ fastify.get("/play", async (request, reply) => {
         </div>
 
         <div class="section-title">Canvas (for Pictionary)</div>
+        <div class="canvas-header">
+          <span>Drawing area</span>
+          <button id="clearCanvasBtn" class="small-outline-button">
+            Clear drawing
+          </button>
+        </div>
         <canvas id="canvas"></canvas>
 
         <div class="section-title">Chat to caller</div>
@@ -654,6 +687,7 @@ fastify.get("/play", async (request, reply) => {
       const howToList = document.getElementById("howToList");
       const roomTag = document.getElementById("roomTag");
       const backHome = document.getElementById("backHome");
+      const clearCanvasBtn = document.getElementById("clearCanvasBtn");
 
       if (backHome) {
         backHome.addEventListener("click", () => {
@@ -705,6 +739,15 @@ fastify.get("/play", async (request, reply) => {
             "Watch the canvas here as the drawer sketches the secret word and help the caller by describing what you see and thinking up guesses."
           ];
           howToList.innerHTML = items.map((text) => "<li>" + text + "</li>").join("");
+        }
+      }
+
+      // Enable clear button only for drawer
+      if (clearCanvasBtn) {
+        if (role === "drawer") {
+          clearCanvasBtn.disabled = false;
+        } else {
+          clearCanvasBtn.disabled = true;
         }
       }
 
@@ -886,6 +929,11 @@ fastify.get("/play", async (request, reply) => {
           }
         }
 
+        if (msg.type === "clearCanvas") {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          log("Canvas cleared.");
+        }
+
         // Caller renders remote drawing
         if (msg.type === "drawSegment" && role === "caller") {
           ctx.beginPath();
@@ -923,6 +971,15 @@ fastify.get("/play", async (request, reply) => {
           }
         });
       }
+
+      // Clear drawing logic
+      if (clearCanvasBtn && role === "drawer") {
+        clearCanvasBtn.addEventListener("click", () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          log("You cleared the canvas.");
+          sendToServer({ type: "clearCanvas" });
+        });
+      }
     </script>
 
   </body>
@@ -943,7 +1000,7 @@ fastify.get("/twiml", async (request, reply) => {
   const twiml = `
 <?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="dtmf" numDigits="6" action="/start-relay" method="GET">
+  <Gather input="dtmf" action="/start-relay" method="GET" finishOnKey="#" timeout="5">
     <Say>Welcome to the Pictionary Hotline. Please enter your 4 to 6 digit room code, then press the pound key.</Say>
   </Gather>
   <Say>We didn't receive any input. Goodbye.</Say>
@@ -960,7 +1017,8 @@ fastify.get("/twiml", async (request, reply) => {
 fastify.get("/start-relay", async (request, reply) => {
   fastify.log.info({ query: request.query }, "HTTP /start-relay hit");
 
-  const digits = (request.query.Digits || request.query.digits || "0000")
+  const q = /** @type {any} */ (request.query || {});
+  const digits = (q.Digits || q.digits || "0000")
     .toString()
     .replace(/\D/g, "")
     .slice(0, 6) || "0000";
@@ -1006,6 +1064,8 @@ fastify.register(async function (instance) {
 
     fastify.log.info({ roomId }, "Phone WebSocket connection opened");
 
+    socketRoom.set(socket, roomId);
+
     const room = getRoom(roomId);
     room.phoneSocket = socket;
 
@@ -1041,6 +1101,7 @@ fastify.register(async function (instance) {
     });
 
     socket.on("close", () => {
+      const roomId = socketRoom.get(socket) || "0000";
       fastify.log.info({ roomId }, "Phone WebSocket closed");
 
       const room = getRoom(roomId);
@@ -1082,7 +1143,7 @@ fastify.register(async function (instance) {
         let role = (parsed.role || "drawer").toLowerCase();
         if (role !== "caller") role = "drawer";
 
-        socket.roomId = roomId;
+        socketRoom.set(socket, roomId);
 
         const room = getRoom(roomId);
 
@@ -1152,7 +1213,7 @@ fastify.register(async function (instance) {
         return;
       }
 
-      const roomId = socket.roomId || "0000";
+      const roomId = socketRoom.get(socket) || "0000";
       const room = getRoom(roomId);
 
       // --- DRAW SEGMENT ---
@@ -1193,6 +1254,20 @@ fastify.register(async function (instance) {
         return;
       }
 
+      // --- CLEAR CANVAS ---
+      if (parsed.type === "clearCanvas") {
+        room.drawSegments = [];
+        fastify.log.info({ roomId }, "Canvas cleared by drawer");
+
+        if (room.drawerSocket) {
+          room.drawerSocket.send(JSON.stringify({ type: "clearCanvas" }));
+        }
+        if (room.callerSocket) {
+          room.callerSocket.send(JSON.stringify({ type: "clearCanvas" }));
+        }
+        return;
+      }
+
       if (parsed.type === "callerAnswer") {
         fastify.log.info(
           { roomId, answer: parsed.answer },
@@ -1202,7 +1277,7 @@ fastify.register(async function (instance) {
     });
 
     socket.on("close", () => {
-      const roomId = socket.roomId || "0000";
+      const roomId = socketRoom.get(socket) || "0000";
       const room = getRoom(roomId);
 
       fastify.log.info({ roomId }, "Web WebSocket closed");
